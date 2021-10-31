@@ -1,13 +1,13 @@
 #### Load Libraries ####
 import sys
-import glob
+import imageio
 from collections import OrderedDict
 import torch
 import torch.nn as nn
 import pandas as pd
 import numpy as np
 import os
-from sklearn.model_selection import train_test_split
+
 from torch import nn, optim, as_tensor
 from torch.utils.data import Dataset, DataLoader
 import torch.nn.functional as F
@@ -20,20 +20,20 @@ from torch.utils.data import Dataset
 from torchvision import transforms as T
 from torchvision.models.resnet import resnet50
 import torch.backends.cudnn as cudnn
-import cv2  
-
-import matplotlib.pyplot as plt
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-path_of_output = sys.argv[4]
+
+path_of_output = sys.argv[3]
 path_of_video = sys.argv[1]
 path_of_kinm = sys.argv[2]
 
 
 test_video = [i for i in sorted(os.listdir(path_of_video))]
 test_kin = [i for i in sorted(os.listdir(path_of_kinm))]
+
+
 
 assert len(test_video) > 0, "No video files were found in the input folder provided!!"
 assert len(test_kin) > 0, "No kinematic files were found in the input folder provided!!"
@@ -93,20 +93,17 @@ class Identity(nn.Module):
 # print('resnet 50 loaded and layers freezed')
 # resnet50_imagenet.cuda()
 # print('Moved to GPU')
-resnet50_imagenet = torch.load('./our_model_weights/model_petraw_resnet50_ex_t_depth_5_ex.pth.tar')
+resnet50_imagenet = torch.load('/root/our_model_weights/model_petraw_resnet50_ex_t_depth_5_ex.pth.tar')
 
 
 
 
 class petraw_model(nn.Module):
-    def __init__(self, imagenet_extractor=None, input_size=28, output_size=None, time_depth=0):
+    def __init__(self, imagenet_extractor=None, input_size=28, hidden_layer_size=64, hidden_size=32, output_size=None, train_p=True, check=True, time_depth=2):
         super(petraw_model, self).__init__()
-        
-        self.imagenet_extractor = imagenet_extractor
-        
-        
-        self.lin_kin = nn.Linear(input_size, 64)
-        self.linear = nn.Linear(64, 32)
+                
+        self.lstm_kin = nn.LSTM(input_size, 64)
+        self.linear = nn.Linear(time_depth * 64, 32)
         hidden_size = 32
         
         self.relu1 = nn.ReLU()
@@ -116,8 +113,9 @@ class petraw_model(nn.Module):
         
         
         ### Video Layers
-        self.fc_ex1 = nn.Linear(2048, 256)
-        self.fc_ex2 = nn.Linear(256, 64)
+        self.lstm_ex1 = nn.LSTM(2048, 256)
+#         self.fc_ex1 = nn.Linear(2048, 256)
+        self.fc_ex2 = nn.Linear(time_depth * 256, 64)
         ex_size = 64
 
         
@@ -135,7 +133,8 @@ class petraw_model(nn.Module):
 
     def forward(self, input_seq, input_image):
         
-        lin_out = self.lin_kin(input_seq)
+        lin_out, _ = self.lstm_kin(input_seq)
+        lin_out = lin_out.view(len(lin_out), -1)
         lin_out = self.relu1(lin_out)
         lin_out = self.drop1(lin_out)
         lin_out = self.linear(lin_out)
@@ -144,7 +143,8 @@ class petraw_model(nn.Module):
             
         if input_image is not None:
 #             x = self.imagenet_extractor(input_image)
-            x = self.fc_ex1(input_image)
+            x, _ = self.lstm_ex1(input_image)
+            x = x.view(len(x), -1)
             x = self.relu3(x)
             x = self.drop3(x)
             x = self.fc_ex2(x)
@@ -160,7 +160,7 @@ class petraw_model(nn.Module):
 
 
 
-model_path = './our_model_weights/model_petraw_resnet50_ex_t_depth_5.pth.tar'
+model_path = '/root/our_model_weights/model_petraw_resnet50_ex_t_depth_5.pth.tar'
 model_list = torch.load(model_path)
 
 output_dict_list = [{0 :'Idle', 1: 'Transfer Left to Right', 2: 'Transfer Right to Left'},
@@ -177,19 +177,14 @@ def read_video_kin_path(v_path, k_path, model_list, output_dict_list):
 
     output_list = [[],[],[],[]]
     kin_input = pd.read_csv(k_path, delimiter = '\t', index_col = 0)
-    cap= cv2.VideoCapture(v_path)
-    i=0
+    cap = imageio.get_reader(v_path,  'ffmpeg')
     t_dep_list = [[],[]]
+        
     
-    while(cap.isOpened()):
-        ret, frame = cap.read()
-        if ret == False:
-            break
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    for num, frame in enumerate(cap.iter_data()):
         frame = Image.fromarray(frame)
         frame = f_transform(frame).unsqueeze(0)
-        frame = resnet50_imagenet(frame).detach()
-        kmatic = torch.from_numpy(kin_input.iloc[i].to_numpy()).unsqueeze(0).float()
+        kmatic = torch.from_numpy(kin_input.iloc[num].to_numpy()).unsqueeze(0).float()
         t_dep_list[0].append(kmatic)
         t_dep_list[1].append(frame)
         t_dep_list[0] = t_dep_list[0][-5:]
@@ -201,9 +196,10 @@ def read_video_kin_path(v_path, k_path, model_list, output_dict_list):
                     o_dict = output_dict_list[m]
                     model, _ = model_list[m]
                     model.to(device).eval()
-                    kmatic_list = torch.cat(t_dep_list[0], dim=0)
+                    kmatic_list = torch.cat(t_dep_list[0], dim=0).to(device).unsqueeze(0)
                     frame_list = torch.cat(t_dep_list[1], dim=0)
-    
+                    frame_list = resnet50_imagenet(frame_list.to(device)).unsqueeze(0)
+
                     out = model(kmatic_list, frame_list)
                     predicted_class = nn.Softmax(dim=1)(out).max(dim=1)[1]
                     predicted_value = [o_dict[k.cpu().item()] for k in predicted_class]
@@ -215,10 +211,7 @@ def read_video_kin_path(v_path, k_path, model_list, output_dict_list):
                 predicted_value = [o_dict[k.cpu().item()] for k in predicted_class]
                 output_list[m].extend(predicted_value)
                       
-        i+=1
         
-    cap.release()
-    cv2.destroyAllWindows()
     
     return output_list
 
