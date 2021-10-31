@@ -195,7 +195,6 @@ class petraw_model(nn.Module):
         
         ### Video Layers
         self.lstm_ex1 = nn.LSTM(2048, 256)
-#         self.fc_ex1 = nn.Linear(2048, 256)
         self.fc_ex2 = nn.Linear(time_depth * 256, 64)
         ex_size = 64
 
@@ -223,7 +222,6 @@ class petraw_model(nn.Module):
         lin_out = self.drop2(lin_out)
             
         if input_image is not None:
-#             x = self.imagenet_extractor(input_image)
             x, _ = self.lstm_ex1(input_image)
             x = x.view(len(x), -1)
             x = self.relu3(x)
@@ -381,17 +379,18 @@ def train(epochs, train_loader, test_loader, model_list, criterion, print_acc_ep
 
 
 
-            
+#### HYPER-PARAMETER SETTING
 models_opt_list = []
 output_size_list = [3,13,7,7]
 models_lr_list = [0.001, 0.001, 0.01, 0.01]
+epoch = 30
+criterion = torch.nn.CrossEntropyLoss(reduction='mean')
 
+#### CREATE 4 MODELS CORRESPONDING TO 4 OUTPUTS
 for i in range(4):
     kbm = petraw_model(output_size = output_size_list[i],
                        check=False, 
                        time_depth=t_depth).cuda()
-#     kbm = nn.DataParallel(kbm)
-    cudnn.benchmark = True
 
     optimizer = optim.Adam(params = kbm.parameters(),
                            lr = models_lr_list[i])
@@ -400,10 +399,7 @@ for i in range(4):
     
     
 
-epoch = 30
-criterion = torch.nn.CrossEntropyLoss(reduction='mean')
-
-
+#### TRAIN MODEL WITH A t=5 TIMESTEPS/FRAMES
 train(epoch, train_loader, test_loader, models_opt_list, criterion, 5, 'model_petraw_resnet50_ex_t_depth_5')
 
 
